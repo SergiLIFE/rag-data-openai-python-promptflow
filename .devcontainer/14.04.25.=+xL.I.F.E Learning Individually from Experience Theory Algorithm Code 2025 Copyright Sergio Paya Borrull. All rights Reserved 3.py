@@ -2951,6 +2951,11 @@ logger.setLevel(logging.INFO)
 if not logger.hasHandlers():
     logger.addHandler(logging.StreamHandler())
 
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+
 # L.I.F.E System Class
 class LIFEAlgorithm:
     def __init__(self):
@@ -3778,6 +3783,19 @@ class AzureLIFE:
         
         await self._post_to_teams(card)
 
+    def _post_to_teams(self, message: str):
+        if not self.teams_client:
+            self.logger.warning("Teams client not initialized. Logging message locally.")
+            self.logger.error(message)
+            return
+        try:
+            self.teams_client.send_message(
+                content=message,
+                channel_id=os.getenv("TEAMS_CHANNEL_ID")
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to post to Teams: {str(e)}")
+
 # Azure Configuration
 azure_config = {
     "subscription_id": "<YOUR_SUBSCRIPTION_ID>",
@@ -3799,3 +3817,115 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+import time
+
+def retry_with_backoff(func, retries=3, delay=1, *args, **kwargs):
+    for attempt in range(retries):
+        try:
+            return func(*args, **kwargs)
+        except ServiceRequestError as e:
+            if attempt < retries - 1:
+                time.sleep(delay * (2 ** attempt))  # Exponential backoff
+            else:
+                raise RuntimeError("Max retries reached") from e
+
+def _validate_env_vars(self):
+    required_vars = ["TEAMS_ENDPOINT", "TEAMS_CHANNEL_ID"]
+    for var in required_vars:
+        if not os.getenv(var):
+            self.logger.warning(f"Environment variable {var} is not set.")
+
+class CircuitBreaker:
+    def __init__(self, failure_threshold=3, recovery_time=60):
+        self.failure_threshold = failure_threshold
+        self.recovery_time = recovery_time
+        self.failures = 0
+        self.last_failure_time = None
+
+    def record_failure(self):
+        self.failures += 1
+        self.last_failure_time = time.time()
+
+    def is_open(self):
+        if self.failures >= self.failure_threshold:
+            if time.time() - self.last_failure_time < self.recovery_time:
+                return True
+            self.failures = 0  # Reset after recovery time
+        return False
+
+import unittest
+from unittest.mock import patch, MagicMock
+
+class TestErrorHandler(unittest.TestCase):
+    def setUp(self):
+        self.error_handler = ErrorHandler()
+
+    @patch("azure.communication.identity.CommunicationIdentityClient.send_message")
+    def test_post_to_teams(self, mock_send_message):
+        mock_send_message.return_value = None
+        self.error_handler._post_to_teams("Test message")
+        mock_send_message.assert_called_once()
+
+    def test_handle_error(self):
+        with self.assertRaises(SystemError):
+            self.error_handler.handle_error(Exception("Critical error"), critical=True)
+
+import logging
+import os
+import time
+from azure.core.exceptions import ServiceRequestError
+from azure.identity import ManagedIdentityCredential
+from azure.communication.identity import CommunicationIdentityClient
+
+class ErrorHandler:
+    def __init__(self):
+        self.logger = logging.getLogger('LIFE.ERROR')
+        self.logger.setLevel(logging.INFO)
+        self._validate_env_vars()
+        self._init_teams_client()
+
+    def _validate_env_vars(self):
+        required_vars = ["TEAMS_ENDPOINT", "TEAMS_CHANNEL_ID"]
+        for var in required_vars:
+            if not os.getenv(var):
+                self.logger.warning(f"Environment variable {var} is not set.")
+
+    def _init_teams_client(self):
+        try:
+            credential = ManagedIdentityCredential()
+            self.teams_client = CommunicationIdentityClient(
+                endpoint=os.getenv("TEAMS_ENDPOINT"),
+                credential=credential
+            )
+        except Exception as e:
+            self.logger.error(f"Teams client initialization failed: {str(e)}")
+            self.teams_client = None
+
+    def _log_error(self, error: Exception, context: str = ""):
+        error_msg = f"{context} - {str(error)}" if context else str(error)
+        if isinstance(error, ServiceRequestError):
+            self.logger.error(f"Network error: {error_msg}")
+        else:
+            self.logger.exception(f"Critical error: {error_msg}")
+
+    def _post_to_teams(self, message: str):
+        if not self.teams_client:
+            self.logger.warning("Teams client not initialized. Logging message locally.")
+            self.logger.error(message)
+            return
+        try:
+            self.teams_client.send_message(
+                content=message,
+                channel_id=os.getenv("TEAMS_CHANNEL_ID")
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to post to Teams: {str(e)}")
+
+    def handle_error(self, error: Exception, context: str = "", critical: bool = False):
+        self._log_error(error, context)
+        if critical:
+            self._post_to_teams(f"Critical error in L.I.F.E system: {context} - {str(error)}")
+            raise SystemError("Critical failure - system halted") from error
+        if isinstance(error, ServiceRequestError):
+            raise RuntimeError("Network error - retrying operation") from error
+        return None
